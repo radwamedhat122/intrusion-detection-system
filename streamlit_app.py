@@ -240,11 +240,6 @@ def dashboard_page():
     st.title("Intrusion Detection System")
     st.caption("Real-time packet monitoring using Scapy + Rule-Based Detection + Sliding Window + Entropy Algorithm")
 
-    st.warning(
-        "This Streamlit app reads real packets only when it is running locally on your own device. "
-        "Run Streamlit as Administrator on Windows."
-    )
-
     with st.sidebar:
         st.header("Detection Settings")
 
