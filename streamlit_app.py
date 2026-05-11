@@ -10,6 +10,127 @@ from collections import Counter
 USERS_FILE = "streamlit_users.json"
 
 
+# =========================
+# Page Config
+# =========================
+
+st.set_page_config(
+    page_title="Intrusion Detection System",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+
+# =========================
+# Styling
+# =========================
+
+st.markdown(
+    """
+    <style>
+    .main-title {
+        font-size: 44px;
+        font-weight: 800;
+        color: #0F172A;
+        margin-bottom: 0px;
+    }
+
+    .subtitle {
+        color: #64748B;
+        font-size: 17px;
+        margin-top: 5px;
+        margin-bottom: 25px;
+    }
+
+    .hero-box {
+        background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%);
+        padding: 28px;
+        border-radius: 18px;
+        color: white;
+        margin-bottom: 25px;
+    }
+
+    .hero-title {
+        font-size: 28px;
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+
+    .hero-text {
+        font-size: 16px;
+        color: #DBEAFE;
+    }
+
+    .info-card {
+        background-color: #FFFFFF;
+        padding: 22px;
+        border-radius: 16px;
+        border: 1px solid #E5E7EB;
+        box-shadow: 0px 4px 18px rgba(15, 23, 42, 0.06);
+        margin-bottom: 18px;
+    }
+
+    .card-title {
+        font-size: 21px;
+        font-weight: 800;
+        color: #111827;
+        margin-bottom: 8px;
+    }
+
+    .card-text {
+        color: #4B5563;
+        font-size: 15px;
+        line-height: 1.6;
+    }
+
+    .metric-card {
+        background-color: #FFFFFF;
+        padding: 18px;
+        border-radius: 14px;
+        border: 1px solid #E5E7EB;
+        text-align: center;
+        box-shadow: 0px 4px 16px rgba(15, 23, 42, 0.05);
+    }
+
+    .metric-value {
+        font-size: 34px;
+        font-weight: 800;
+        color: #2563EB;
+    }
+
+    .metric-label {
+        color: #64748B;
+        font-size: 14px;
+        font-weight: 600;
+    }
+
+    .success-box {
+        background-color: #ECFDF5;
+        border: 1px solid #A7F3D0;
+        color: #065F46;
+        padding: 16px;
+        border-radius: 12px;
+        margin-bottom: 18px;
+    }
+
+    .warning-box {
+        background-color: #EFF6FF;
+        border: 1px solid #BFDBFE;
+        color: #1E40AF;
+        padding: 16px;
+        border-radius: 12px;
+        margin-bottom: 18px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# =========================
+# Authentication
+# =========================
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -102,6 +223,10 @@ def initialize_state():
         st.session_state.current_user = None
 
 
+# =========================
+# Detection Algorithms
+# =========================
+
 def calculate_entropy(values):
     values = [v for v in values if pd.notna(v)]
 
@@ -132,10 +257,10 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
         "packet_length"
     ]
 
-    missing = [col for col in required_columns if col not in df.columns]
+    missing_columns = [col for col in required_columns if col not in df.columns]
 
-    if missing:
-        st.error(f"CSV file is missing required columns: {missing}")
+    if missing_columns:
+        st.error(f"CSV file is missing required columns: {missing_columns}")
         return None
 
     df = df.copy()
@@ -145,6 +270,7 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
     df["dst_ip"] = df["dst_ip"].astype(str)
     df["flags"] = df["flags"].astype(str)
     df["dst_port"] = pd.to_numeric(df["dst_port"], errors="coerce")
+    df["packet_length"] = pd.to_numeric(df["packet_length"], errors="coerce")
 
     alerts = []
     suspicious_ips = set()
@@ -175,6 +301,7 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
             alerts.append({
                 "Attack Type": "Entropy Port Scan",
                 "Source IP": src_ip,
+                "Severity": "High",
                 "Details": f"Entropy={entropy_score:.2f}, Unique Ports={len(unique_ports)}"
             })
 
@@ -184,6 +311,7 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
             alerts.append({
                 "Attack Type": "Port Scan",
                 "Source IP": src_ip,
+                "Severity": "Medium",
                 "Details": f"{len(unique_ports)} different destination ports"
             })
 
@@ -193,6 +321,7 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
             alerts.append({
                 "Attack Type": "SYN Flood",
                 "Source IP": src_ip,
+                "Severity": "High",
                 "Details": f"{syn_count} SYN packets"
             })
 
@@ -207,6 +336,7 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
             alerts.append({
                 "Attack Type": "ICMP Flood",
                 "Source IP": src_ip,
+                "Severity": "High",
                 "Details": f"{icmp_count} ICMP packets"
             })
 
@@ -220,12 +350,16 @@ def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_t
     }
 
 
+# =========================
+# Pages
+# =========================
+
 def login_page():
     st.markdown(
         """
         <div style="text-align:center; padding: 30px 0 20px 0;">
-            <h1 style="font-size:48px; color:#0F172A;">Intrusion Detection System</h1>
-            <p style="font-size:18px; color:#64748B;">Web Dashboard for Real Packet Traffic Analysis</p>
+            <h1 style="font-size:50px; color:#0F172A; margin-bottom:5px;">Intrusion Detection System</h1>
+            <p style="font-size:18px; color:#64748B;">Cyber Security Web Dashboard</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -266,7 +400,6 @@ def dashboard_page():
         st.rerun()
 
     st.sidebar.header("Detection Settings")
-
     port_threshold = st.sidebar.number_input("Port Threshold", min_value=1, value=10)
     syn_threshold = st.sidebar.number_input("SYN Threshold", min_value=1, value=20)
     icmp_threshold = st.sidebar.number_input("ICMP Threshold", min_value=1, value=15)
@@ -275,20 +408,79 @@ def dashboard_page():
     entropy_threshold = st.sidebar.number_input("Entropy Threshold", min_value=0.1, value=2.0, step=0.1)
     entropy_min_ports = st.sidebar.number_input("Entropy Min Unique Ports", min_value=2, value=5)
 
-    st.title("Intrusion Detection System")
-    st.caption("Rule-Based Detection + Sliding Window Concept + Entropy-Based Anomaly Detection")
+    st.markdown('<div class="main-title">Intrusion Detection System</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="subtitle">Web-based analysis dashboard for real packet logs captured by the local IDS agent.</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown(
         """
-        Upload the real CSV packet log generated by the local IDS system.
-        The uploaded file is analyzed using Port Scan, SYN Flood, ICMP Flood, and Entropy-Based detection.
-        """
+        <div class="hero-box">
+            <div class="hero-title">Real Packet IDS Architecture</div>
+            <div class="hero-text">
+                The local IDS agent captures real network packets from the device using Scapy.
+                The generated CSV packet log is uploaded here for professional analysis, visualization,
+                and attack detection using Rule-Based Detection and Entropy-Based Anomaly Detection.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
-    uploaded_file = st.file_uploader("Upload packets CSV file", type=["csv"])
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        st.markdown(
+            """
+            <div class="info-card">
+                <div class="card-title">1. Capture</div>
+                <div class="card-text">
+                    Run the local IDS module on the device to capture real packets from the network interface.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col_b:
+        st.markdown(
+            """
+            <div class="info-card">
+                <div class="card-title">2. Export</div>
+                <div class="card-text">
+                    The captured packet data is saved into a CSV file such as <b>packets_log.csv</b>.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col_c:
+        st.markdown(
+            """
+            <div class="info-card">
+                <div class="card-title">3. Analyze</div>
+                <div class="card-text">
+                    Upload the CSV file to this dashboard to detect attacks and visualize network activity.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    uploaded_file = st.file_uploader("Upload captured packet CSV file", type=["csv"])
 
     if uploaded_file is None:
-        st.info("Upload the real packets CSV file generated from your local IDS, such as packets_log.csv.")
+        st.markdown(
+            """
+            <div class="warning-box">
+                Upload the real packet CSV file generated from the local IDS, for example:
+                <b>packets_log.csv</b>.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
         return
 
     try:
@@ -309,14 +501,62 @@ def dashboard_page():
     if results is None:
         return
 
+    st.markdown(
+        """
+        <div class="success-box">
+            CSV file uploaded and analyzed successfully.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.subheader("IDS Analysis Summary")
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Packets Captured", results["total_packets"])
-    col2.metric("Alerts", len(results["alerts"]))
-    col3.metric("Suspicious IPs", len(results["suspicious_ips"]))
-    col4.metric("Entropy Alerts", results["attack_stats"].get("Entropy Port Scan", 0))
+    with col1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{results["total_packets"]}</div>
+                <div class="metric-label">Packets Captured</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col2:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{len(results["alerts"])}</div>
+                <div class="metric-label">Alerts</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col3:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{len(results["suspicious_ips"])}</div>
+                <div class="metric-label">Suspicious IPs</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col4:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{results["attack_stats"].get("Entropy Port Scan", 0)}</div>
+                <div class="metric-label">Entropy Alerts</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     st.divider()
 
@@ -329,7 +569,9 @@ def dashboard_page():
             columns=["Protocol", "Count"]
         )
         st.dataframe(protocol_df, use_container_width=True)
-        st.bar_chart(protocol_df.set_index("Protocol"))
+
+        if not protocol_df.empty:
+            st.bar_chart(protocol_df.set_index("Protocol"))
 
     with right:
         st.subheader("Attack Statistics")
@@ -338,7 +580,9 @@ def dashboard_page():
             columns=["Attack Type", "Count"]
         )
         st.dataframe(attack_df, use_container_width=True)
-        st.bar_chart(attack_df.set_index("Attack Type"))
+
+        if not attack_df.empty:
+            st.bar_chart(attack_df.set_index("Attack Type"))
 
     st.divider()
 
@@ -352,7 +596,10 @@ def dashboard_page():
     st.subheader("Suspicious IPs")
 
     if results["suspicious_ips"]:
-        st.dataframe(pd.DataFrame(results["suspicious_ips"], columns=["Suspicious IP"]), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(results["suspicious_ips"], columns=["Suspicious IP"]),
+            use_container_width=True
+        )
     else:
         st.info("No suspicious IPs detected.")
 
@@ -361,12 +608,6 @@ def dashboard_page():
 
 
 def main():
-    st.set_page_config(
-        page_title="Intrusion Detection System",
-        page_icon="🛡️",
-        layout="wide"
-    )
-
     initialize_state()
 
     if not st.session_state.logged_in:
