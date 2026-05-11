@@ -1,12 +1,10 @@
 import streamlit as st
-import threading
-import queue
-import time
+import pandas as pd
+import hashlib
 import json
 import os
-import hashlib
-import pandas as pd
-from ids import MiniIDS
+import math
+from collections import Counter
 
 
 USERS_FILE = "streamlit_users.json"
@@ -90,112 +88,148 @@ def login_user(username_or_email, password):
         if (username_match or email_match) and password_match:
             st.session_state.logged_in = True
             st.session_state.current_user = user
-            return True
+            st.rerun()
 
     st.error("Invalid username/email or password.")
     return False
 
 
 def initialize_state():
-    defaults = {
-        "logged_in": False,
-        "current_user": None,
-        "page": "login",
-        "ids": None,
-        "ids_thread": None,
-        "running": False,
-        "messages": [],
-        "log_queue": queue.Queue()
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+
+    if "current_user" not in st.session_state:
+        st.session_state.current_user = None
+
+
+def calculate_entropy(values):
+    values = [v for v in values if pd.notna(v)]
+
+    if not values:
+        return 0.0
+
+    counts = Counter(values)
+    total = len(values)
+
+    entropy = 0.0
+
+    for count in counts.values():
+        probability = count / total
+        entropy -= probability * math.log2(probability)
+
+    return entropy
+
+
+def analyze_packets(df, port_threshold, syn_threshold, icmp_threshold, entropy_threshold, entropy_min_ports):
+    required_columns = [
+        "timestamp",
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "src_port",
+        "dst_port",
+        "flags",
+        "packet_length"
+    ]
+
+    missing = [col for col in required_columns if col not in df.columns]
+
+    if missing:
+        st.error(f"CSV file is missing required columns: {missing}")
+        return None
+
+    df = df.copy()
+
+    df["protocol"] = df["protocol"].astype(str)
+    df["src_ip"] = df["src_ip"].astype(str)
+    df["dst_ip"] = df["dst_ip"].astype(str)
+    df["flags"] = df["flags"].astype(str)
+    df["dst_port"] = pd.to_numeric(df["dst_port"], errors="coerce")
+
+    alerts = []
+    suspicious_ips = set()
+
+    protocol_stats = df["protocol"].value_counts().to_dict()
+
+    attack_stats = {
+        "Port Scan": 0,
+        "SYN Flood": 0,
+        "ICMP Flood": 0,
+        "Entropy Port Scan": 0
     }
 
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    tcp_syn = df[
+        (df["protocol"].str.upper() == "TCP") &
+        (df["flags"].str.upper() == "S")
+    ]
 
+    for src_ip, group in tcp_syn.groupby("src_ip"):
+        dst_ports = group["dst_port"].dropna().astype(int).tolist()
+        unique_ports = set(dst_ports)
+        syn_count = len(group)
+        entropy_score = calculate_entropy(dst_ports)
 
-def add_message(message):
-    st.session_state.log_queue.put(message)
+        if len(unique_ports) >= entropy_min_ports and entropy_score >= entropy_threshold:
+            suspicious_ips.add(src_ip)
+            attack_stats["Entropy Port Scan"] += 1
+            alerts.append({
+                "Attack Type": "Entropy Port Scan",
+                "Source IP": src_ip,
+                "Details": f"Entropy={entropy_score:.2f}, Unique Ports={len(unique_ports)}"
+            })
 
+        elif len(unique_ports) >= port_threshold:
+            suspicious_ips.add(src_ip)
+            attack_stats["Port Scan"] += 1
+            alerts.append({
+                "Attack Type": "Port Scan",
+                "Source IP": src_ip,
+                "Details": f"{len(unique_ports)} different destination ports"
+            })
 
-def drain_messages():
-    while not st.session_state.log_queue.empty():
-        message = st.session_state.log_queue.get()
-        st.session_state.messages.append(message)
+        elif syn_count >= syn_threshold:
+            suspicious_ips.add(src_ip)
+            attack_stats["SYN Flood"] += 1
+            alerts.append({
+                "Attack Type": "SYN Flood",
+                "Source IP": src_ip,
+                "Details": f"{syn_count} SYN packets"
+            })
 
-    if len(st.session_state.messages) > 300:
-        st.session_state.messages = st.session_state.messages[-300:]
+    icmp_df = df[df["protocol"].str.upper() == "ICMP"]
 
+    for src_ip, group in icmp_df.groupby("src_ip"):
+        icmp_count = len(group)
 
-def start_ids(time_window, port_threshold, syn_threshold, icmp_threshold, entropy_threshold, entropy_min_ports):
-    if st.session_state.running:
-        st.warning("IDS is already running.")
-        return
+        if icmp_count >= icmp_threshold:
+            suspicious_ips.add(src_ip)
+            attack_stats["ICMP Flood"] += 1
+            alerts.append({
+                "Attack Type": "ICMP Flood",
+                "Source IP": src_ip,
+                "Details": f"{icmp_count} ICMP packets"
+            })
 
-    st.session_state.messages = []
-    st.session_state.log_queue = queue.Queue()
-
-    ids = MiniIDS(
-        time_window=time_window,
-        port_threshold=port_threshold,
-        syn_threshold=syn_threshold,
-        icmp_threshold=icmp_threshold,
-        entropy_threshold=entropy_threshold,
-        entropy_min_ports=entropy_min_ports,
-        log_file="streamlit_ids_alerts.log",
-        csv_file="streamlit_packets_log.csv",
-        output_callback=add_message,
-        alert_callback=add_message
-    )
-
-    thread = threading.Thread(target=ids.sniff_packets, daemon=True)
-    thread.start()
-
-    st.session_state.ids = ids
-    st.session_state.ids_thread = thread
-    st.session_state.running = True
-
-    add_message("IDS started successfully.")
-    add_message("The system is now monitoring real network packets from this device.")
-    add_message("-" * 80)
-
-
-def stop_ids():
-    if st.session_state.ids is not None and st.session_state.running:
-        st.session_state.ids.stop()
-        st.session_state.running = False
-        add_message("-" * 80)
-        add_message("IDS stopped.")
-    else:
-        st.info("IDS is not running.")
+    return {
+        "total_packets": len(df),
+        "protocol_stats": protocol_stats,
+        "attack_stats": attack_stats,
+        "suspicious_ips": sorted(list(suspicious_ips)),
+        "alerts": alerts,
+        "df": df
+    }
 
 
 def login_page():
     st.markdown(
         """
-        <style>
-        .main {
-            background-color: #F3F6FB;
-        }
-        .login-title {
-            font-size: 42px;
-            font-weight: 800;
-            color: #0F172A;
-            text-align: center;
-            margin-top: 30px;
-        }
-        .login-subtitle {
-            font-size: 18px;
-            color: #64748B;
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        </style>
+        <div style="text-align:center; padding: 30px 0 20px 0;">
+            <h1 style="font-size:48px; color:#0F172A;">Intrusion Detection System</h1>
+            <p style="font-size:18px; color:#64748B;">Web Dashboard for Real Packet Traffic Analysis</p>
+        </div>
         """,
         unsafe_allow_html=True
     )
-
-    st.markdown('<div class="login-title">Intrusion Detection System</div>', unsafe_allow_html=True)
-    st.markdown('<div class="login-subtitle">Real-Time Network Packet Monitoring</div>', unsafe_allow_html=True)
 
     tab1, tab2 = st.tabs(["Login", "Create Account"])
 
@@ -220,8 +254,6 @@ def login_page():
 
 
 def dashboard_page():
-    drain_messages()
-
     user = st.session_state.current_user
     user_name = user["full_name"] if user else "User"
 
@@ -229,78 +261,62 @@ def dashboard_page():
     st.sidebar.caption(f"Signed in as: {user_name}")
 
     if st.sidebar.button("Logout"):
-        if st.session_state.ids is not None and st.session_state.running:
-            st.session_state.ids.stop()
-
         st.session_state.logged_in = False
         st.session_state.current_user = None
-        st.session_state.running = False
         st.rerun()
 
+    st.sidebar.header("Detection Settings")
+
+    port_threshold = st.sidebar.number_input("Port Threshold", min_value=1, value=10)
+    syn_threshold = st.sidebar.number_input("SYN Threshold", min_value=1, value=20)
+    icmp_threshold = st.sidebar.number_input("ICMP Threshold", min_value=1, value=15)
+
+    st.sidebar.header("Entropy Algorithm")
+    entropy_threshold = st.sidebar.number_input("Entropy Threshold", min_value=0.1, value=2.0, step=0.1)
+    entropy_min_ports = st.sidebar.number_input("Entropy Min Unique Ports", min_value=2, value=5)
+
     st.title("Intrusion Detection System")
-    st.caption("Real-time packet monitoring using Scapy + Rule-Based Detection + Sliding Window + Entropy Algorithm")
+    st.caption("Rule-Based Detection + Sliding Window Concept + Entropy-Based Anomaly Detection")
 
-    with st.sidebar:
-        st.header("Detection Settings")
+    st.markdown(
+        """
+        Upload the real CSV packet log generated by the local IDS system.
+        The uploaded file is analyzed using Port Scan, SYN Flood, ICMP Flood, and Entropy-Based detection.
+        """
+    )
 
-        time_window = st.number_input("Time Window (seconds)", min_value=1, value=10)
-        port_threshold = st.number_input("Port Threshold", min_value=1, value=10)
-        syn_threshold = st.number_input("SYN Threshold", min_value=1, value=20)
-        icmp_threshold = st.number_input("ICMP Threshold", min_value=1, value=15)
+    uploaded_file = st.file_uploader("Upload packets CSV file", type=["csv"])
 
-        st.header("Entropy Algorithm")
-        entropy_threshold = st.number_input("Entropy Threshold", min_value=0.1, value=2.0, step=0.1)
-        entropy_min_ports = st.number_input("Entropy Min Unique Ports", min_value=2, value=5)
+    if uploaded_file is None:
+        st.info("Upload the real packets CSV file generated from your local IDS, such as packets_log.csv.")
+        return
 
-        st.divider()
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Could not read CSV file: {e}")
+        return
 
-        col_a, col_b = st.columns(2)
+    results = analyze_packets(
+        df,
+        int(port_threshold),
+        int(syn_threshold),
+        int(icmp_threshold),
+        float(entropy_threshold),
+        int(entropy_min_ports)
+    )
 
-        with col_a:
-            if st.button("Start IDS", use_container_width=True):
-                start_ids(
-                    int(time_window),
-                    int(port_threshold),
-                    int(syn_threshold),
-                    int(icmp_threshold),
-                    float(entropy_threshold),
-                    int(entropy_min_ports)
-                )
-                st.rerun()
+    if results is None:
+        return
 
-        with col_b:
-            if st.button("Stop IDS", use_container_width=True):
-                stop_ids()
-                st.rerun()
-
-        if st.button("Refresh Dashboard", use_container_width=True):
-            st.rerun()
-
-    status = "Running" if st.session_state.running else "Stopped"
-    status_color = "🟢" if st.session_state.running else "🔴"
-
-    st.subheader(f"{status_color} IDS Status: {status}")
-
-    stats = None
-
-    if st.session_state.ids is not None:
-        stats = st.session_state.ids.get_stats()
-    else:
-        stats = {
-            "packet_count": 0,
-            "alert_count": 0,
-            "protocol_stats": {"TCP": 0, "UDP": 0, "ICMP": 0, "OTHER": 0},
-            "attack_stats": {"Port Scan": 0, "SYN Flood": 0, "ICMP Flood": 0, "Entropy Port Scan": 0},
-            "suspicious_ips": [],
-            "alert_history": []
-        }
+    st.subheader("IDS Analysis Summary")
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Packets Captured", stats["packet_count"])
-    col2.metric("Alerts", stats["alert_count"])
-    col3.metric("Suspicious IPs", len(stats["suspicious_ips"]))
-    col4.metric("Entropy Alerts", stats["attack_stats"].get("Entropy Port Scan", 0))
+    col1.metric("Packets Captured", results["total_packets"])
+    col2.metric("Alerts", len(results["alerts"]))
+    col3.metric("Suspicious IPs", len(results["suspicious_ips"]))
+    col4.metric("Entropy Alerts", results["attack_stats"].get("Entropy Port Scan", 0))
 
     st.divider()
 
@@ -309,58 +325,39 @@ def dashboard_page():
     with left:
         st.subheader("Protocol Statistics")
         protocol_df = pd.DataFrame(
-            list(stats["protocol_stats"].items()),
+            list(results["protocol_stats"].items()),
             columns=["Protocol", "Count"]
         )
         st.dataframe(protocol_df, use_container_width=True)
-
         st.bar_chart(protocol_df.set_index("Protocol"))
 
     with right:
         st.subheader("Attack Statistics")
         attack_df = pd.DataFrame(
-            list(stats["attack_stats"].items()),
+            list(results["attack_stats"].items()),
             columns=["Attack Type", "Count"]
         )
         st.dataframe(attack_df, use_container_width=True)
-
         st.bar_chart(attack_df.set_index("Attack Type"))
 
     st.divider()
 
+    st.subheader("Detected Alerts")
+
+    if results["alerts"]:
+        st.dataframe(pd.DataFrame(results["alerts"]), use_container_width=True)
+    else:
+        st.success("No suspicious activity detected based on the current thresholds.")
+
     st.subheader("Suspicious IPs")
 
-    if stats["suspicious_ips"]:
-        st.dataframe(
-            pd.DataFrame(stats["suspicious_ips"], columns=["Suspicious IP"]),
-            use_container_width=True
-        )
+    if results["suspicious_ips"]:
+        st.dataframe(pd.DataFrame(results["suspicious_ips"], columns=["Suspicious IP"]), use_container_width=True)
     else:
-        st.info("No suspicious IPs detected yet.")
+        st.info("No suspicious IPs detected.")
 
-    st.subheader("Live IDS Output")
-
-    output_text = "\n".join(st.session_state.messages[-120:])
-
-    st.text_area(
-        "Output",
-        value=output_text,
-        height=350,
-        label_visibility="collapsed"
-    )
-
-    if os.path.exists("streamlit_packets_log.csv"):
-        st.subheader("Captured Packets CSV Preview")
-
-        try:
-            df = pd.read_csv("streamlit_packets_log.csv")
-            st.dataframe(df.tail(30), use_container_width=True)
-        except Exception:
-            st.info("CSV file exists but cannot be displayed yet.")
-
-    if st.session_state.running:
-        time.sleep(1)
-        st.rerun()
+    st.subheader("Captured Packets Preview")
+    st.dataframe(results["df"].tail(50), use_container_width=True)
 
 
 def main():
